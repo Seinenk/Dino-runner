@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdint.h>
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
@@ -18,6 +19,9 @@
 // Definição do número total de LEDs e do pino de controle.
 #define LED_COUNT 25
 #define LED_PIN 7
+
+// Fator de brilho para ajuste de intensidade luminosa
+#define LED_BRIGHTNESS 0.3f
 
 const uint I2C_SDA = 14;
 const uint I2C_SCL = 15;
@@ -51,6 +55,14 @@ int getIndex(int x, int y)
   {
     return 24 - (y * 5 + (4 - x)); // Linha ímpar (direita para esquerda).
   }
+}
+
+// Define a cor de um LED específico na matriz.
+void npSetLED(const uint index, const uint8_t r, const uint8_t g, const uint8_t b)
+{
+  leds[index].R = (uint8_t)(r * LED_BRIGHTNESS);
+  leds[index].G = (uint8_t)(g * LED_BRIGHTNESS);
+  leds[index].B = (uint8_t)(b * LED_BRIGHTNESS);
 }
 
 // Atualiza o buffer de LEDs com os valores de um sprite fornecido.
@@ -92,14 +104,6 @@ void npInit(uint pin)
     leds[i].G = 0;
     leds[i].B = 0;
   }
-}
-
-// Define a cor de um LED específico na matriz.
-void npSetLED(const uint index, const uint8_t r, const uint8_t g, const uint8_t b)
-{
-  leds[index].R = r;
-  leds[index].G = g;
-  leds[index].B = b;
 }
 
 // Apaga toda a matriz de LEDs.
