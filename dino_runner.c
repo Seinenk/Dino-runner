@@ -1,104 +1,124 @@
 #include <stdio.h>
 #include <stdint.h>
-#include "pico/stdlib.h"
-#include "hardware/pio.h"
-#include "hardware/clocks.h"
-#include "time.h"
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
+#include "pico/stdlib.h"
 #include "pico/binary_info.h"
-#include "inc/ssd1306.h"
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
 #include "hardware/i2c.h"
 
+#include "inc/ssd1306.h" // Biblioteca para controlar o display
+#include "ws2818b.pio.h" // Programa PIO para controlar os LEDs RGB
+
+// Função auxiliar: retorna o maior valor entre a e b
 #define max(a, b) ((a) > (b) ? (a) : (b))
 
-// Biblioteca gerada pelo arquivo .pio durante compilação.
-#include "ws2818b.pio.h"
-
-// Definição do número total de LEDs e do pino de controle.
+// Quantidade de LEDs na matriz (5x5 = 25)
 #define LED_COUNT 25
+// Pino onde a fita/matriz de LEDs está conectada
 #define LED_PIN 7
-
-// Fator de brilho para ajuste de intensidade luminosa
+// Fator de brilho: 0.3f = 30% da intensidade
 #define LED_BRIGHTNESS 0.3f
 
+// Pinos dos botões
+#define BUTTON_PIN 5  // Botão de pulo
+#define BUTTON_PIN2 6 // Botão de abaixar
+
+// Pinos I2C para o display (SSD1306)
 const uint I2C_SDA = 14;
 const uint I2C_SCL = 15;
 
-// Estrutura para representar um pixel na matriz de LEDs.
+// Estrutura de cada LED: compõe-se de valores G, R, B
 struct pixel_t
 {
-  uint8_t G, R, B; // Cada LED é composto por valores RGB.
+  uint8_t G, R, B;
 };
+// Alias para pixel_t
 typedef struct pixel_t pixel_t;
-typedef pixel_t npLED_t; // Alias para npLED_t, representando um LED na matriz.
+typedef pixel_t npLED_t;
 
-// Buffer de LEDs para representar a matriz 5x5 do jogo.
+// Array global que representa nosso buffer de LEDs
 npLED_t leds[LED_COUNT];
 
-// Variáveis para configuração da máquina de estado PIO.
+// Variáveis para trabalhar com PIO
 PIO np_pio;
 uint sm;
 
-// Converte as coordenadas (x, y) da matriz de LEDs para um índice no buffer.
-// Isso é necessário porque a matriz não segue um mapeamento linear direto.
+//------------------------------------------------------------------------------
+// getIndex: Converte (x,y) em um índice para acessar o array leds[]
+//------------------------------------------------------------------------------
+// Observação: Como a fiação da matriz nem sempre é linear, precisamos de um
+// mapeamento personalizado.
+// Neste caso, se a linha y é par, lemos da esquerda pra direita,
+// se ímpar, da direita pra esquerda. Ajuste se sua ligação for diferente.
+//------------------------------------------------------------------------------
 int getIndex(int x, int y)
 {
-  // Se a linha for par (0, 2, 4), percorremos da esquerda para a direita.
-  // Se a linha for ímpar (1, 3), percorremos da direita para a esquerda.
   if (y % 2 == 0)
   {
-    return 24 - (y * 5 + x); // Linha par (esquerda para direita).
+    return 24 - (y * 5 + x);
   }
   else
   {
-    return 24 - (y * 5 + (4 - x)); // Linha ímpar (direita para esquerda).
+    return 24 - (y * 5 + (4 - x));
   }
 }
 
-// Define a cor de um LED específico na matriz.
-void npSetLED(const uint index, const uint8_t r, const uint8_t g, const uint8_t b)
+//------------------------------------------------------------------------------
+// npSetLED: Ajusta as cores de um pixel específico do buffer, aplicando o brilho.
+//------------------------------------------------------------------------------
+void npSetLED(uint index, uint8_t r, uint8_t g, uint8_t b)
 {
   leds[index].R = (uint8_t)(r * LED_BRIGHTNESS);
   leds[index].G = (uint8_t)(g * LED_BRIGHTNESS);
   leds[index].B = (uint8_t)(b * LED_BRIGHTNESS);
 }
 
-// Atualiza o buffer de LEDs com os valores de um sprite fornecido.
+//------------------------------------------------------------------------------
+// setLeds: Copia uma matriz 5x5x3 ("sprite") para o buffer de LEDs global.
+// Cada pixel da matriz vira um LED na posição mapeada por getIndex.
+//------------------------------------------------------------------------------
 void setLeds(int matriz[5][5][3])
 {
   for (int linha = 0; linha < 5; linha++)
   {
     for (int coluna = 0; coluna < 5; coluna++)
     {
-      int posicao = getIndex(linha, coluna);
-      npSetLED(posicao, matriz[coluna][linha][0], matriz[coluna][linha][1], matriz[coluna][linha][2]);
+      int pos = getIndex(linha, coluna);
+      npSetLED(pos,
+               matriz[coluna][linha][0],
+               matriz[coluna][linha][1],
+               matriz[coluna][linha][2]);
     }
   }
 }
 
-// Inicializa a máquina de estado PIO para controlar os LEDs NeoPixel.
+//------------------------------------------------------------------------------
+// npInit: Inicializa a PIO para enviar dados aos LEDs do tipo WS2812
+//------------------------------------------------------------------------------
 void npInit(uint pin)
 {
-
-  // Cria programa PIO.
+  // Adiciona programa PIO no pio0
   uint offset = pio_add_program(pio0, &ws2818b_program);
   np_pio = pio0;
 
-  // Toma posse de uma máquina PIO.
+  // Tenta obter uma state machine livre
   sm = pio_claim_unused_sm(np_pio, false);
   if (sm < 0)
   {
+    // Se não houver, tentamos o pio1
     np_pio = pio1;
-    sm = pio_claim_unused_sm(np_pio, true); // Se nenhuma máquina estiver livre, panic!
+    sm = pio_claim_unused_sm(np_pio, true);
   }
 
-  // Inicia programa na máquina PIO obtida.
+  // Inicializa a SM com a frequencia de 800kHz para NeoPixel
   ws2818b_program_init(np_pio, sm, offset, pin, 800000.f);
 
-  // Inicializa buffer de LEDs com valores apagados.
-  for (uint i = 0; i < LED_COUNT; ++i)
+  // Zera o buffer inicial
+  for (uint i = 0; i < LED_COUNT; i++)
   {
     leds[i].R = 0;
     leds[i].G = 0;
@@ -106,50 +126,66 @@ void npInit(uint pin)
   }
 }
 
-// Apaga toda a matriz de LEDs.
+//------------------------------------------------------------------------------
+// npClear: Apaga todos os LEDs do buffer (atribui 0 a cada componente)
+//------------------------------------------------------------------------------
 void npClear()
 {
-  for (uint i = 0; i < LED_COUNT; ++i)
+  for (uint i = 0; i < LED_COUNT; i++)
+  {
     npSetLED(i, 0, 0, 0);
+  }
 }
 
-// Atualiza fisicamente a matriz de LEDs com os valores do buffer.
+//------------------------------------------------------------------------------
+// npWrite: Envia o conteúdo do buffer leds[] para a fita/matriz WS2812
+//------------------------------------------------------------------------------
 void npWrite()
 {
-  // Escreve cada dado de 8-bits dos pixels em sequência no buffer da máquina PIO.
-  for (uint i = 0; i < LED_COUNT; ++i)
+  for (uint i = 0; i < LED_COUNT; i++)
   {
     pio_sm_put_blocking(np_pio, sm, leds[i].G);
     pio_sm_put_blocking(np_pio, sm, leds[i].R);
     pio_sm_put_blocking(np_pio, sm, leds[i].B);
   }
-  sleep_us(100); // Espera 100us, sinal de RESET do datasheet.
+  // Pequeno delay para resetar o sinal dos WS2812
+  sleep_us(100);
 }
 
-// Verifica se há colisão entre o dinossauro e um inimigo na matriz de LEDs.
+//------------------------------------------------------------------------------
+// inimigo_colide: Verifica se o sprite do dino e o inimigo se sobrepõem.
+//------------------------------------------------------------------------------
+// Retorna != 0 se as coordenadas do inimigo contiverem algum pixel != 0 no
+// sprite do dino, caracterizando colisão.
+//------------------------------------------------------------------------------
 int inimigo_colide(int posicao[2], int matriz[5][5][3])
 {
   int linha = posicao[0];
   int coluna = posicao[1];
-
-  return matriz[linha][coluna][0] != 0 || matriz[linha][coluna][1] != 0 || matriz[linha][coluna][2] != 0;
+  return (matriz[linha][coluna][0] != 0 ||
+          matriz[linha][coluna][1] != 0 ||
+          matriz[linha][coluna][2] != 0);
 }
 
-// Copia os dados de um sprite para outro.
-void copia_sprite(int sprite1[5][5][3], int sprite2[5][5][3])
+//------------------------------------------------------------------------------
+// copia_sprite: Copia o conteúdo de uma matriz 5x5x3 para outra
+//------------------------------------------------------------------------------
+void copia_sprite(int src[5][5][3], int dst[5][5][3])
 {
   for (int i = 0; i < 5; i++)
   {
     for (int j = 0; j < 5; j++)
     {
-      sprite2[i][j][0] = sprite1[i][j][0];
-      sprite2[i][j][1] = sprite1[i][j][1];
-      sprite2[i][j][2] = sprite1[i][j][2];
+      dst[i][j][0] = src[i][j][0];
+      dst[i][j][1] = src[i][j][1];
+      dst[i][j][2] = src[i][j][2];
     }
   }
 }
 
-// Reseta todos os pixels de um sprite para valores zerados.
+//------------------------------------------------------------------------------
+// limpa_sprite: Zera todos os pixels de uma matriz 5x5x3
+//------------------------------------------------------------------------------
 void limpa_sprite(int sprite[5][5][3])
 {
   for (int i = 0; i < 5; i++)
@@ -163,33 +199,35 @@ void limpa_sprite(int sprite[5][5][3])
   }
 }
 
-// Loop principal do jogo: gerencia a lógica do Dino Runner.
+//------------------------------------------------------------------------------
+// main: Função principal do jogo Dino Runner (com 1 inimigo)
+//------------------------------------------------------------------------------
 int main()
 {
-  srand(time(NULL));
+  // Usa tempo em microssegundos desde o boot como semente de rand(),
+  // garantindo seeds mais variadas.
+  srand((unsigned)to_us_since_boot(get_absolute_time()));
 
-  int inimigo = 1;
+  // Flag que indica se houve colisão (Game Over)
+  int colidiu = 0;
 
-  // Inicializa os botões de entrada.
-  const uint BUTTON_PIN = 5;
+  // Inicializa GPIO dos botões (pulo e abaixar)
   gpio_init(BUTTON_PIN);
   gpio_set_dir(BUTTON_PIN, GPIO_IN);
   gpio_pull_up(BUTTON_PIN);
 
-  const uint BUTTON_PIN2 = 6;
   gpio_init(BUTTON_PIN2);
   gpio_set_dir(BUTTON_PIN2, GPIO_IN);
   gpio_pull_up(BUTTON_PIN2);
 
-  // Inicializa entradas e saídas.
+  // Habilita entrada/saída padrão
   stdio_init_all();
 
-  // Inicializa matriz de LEDs NeoPixel.
+  // Inicia LEDs e limpa
   npInit(LED_PIN);
   npClear();
 
-  // Aqui, você desenha nos LEDs.
-
+  // Sprites do dinossauro em diferentes posições (em pé, pulando, abaixado)
   int sprite_dinossauro_em_pe[5][5][3] = {
       {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
       {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
@@ -214,99 +252,80 @@ int main()
       {{0, 0, 255}, {0, 0, 255}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
   };
 
-  int colidiu = 0;
+  // Controle do dino
   int pulo = 0;
   int pulo_delay = 200;
   int abaixado = 0;
   int abaixado_delay = 200;
 
-  int posicao_inimigo[2] = {4, 4};
-  int posicao_inimigo2[2] = {3, -1};
+  // Variáveis do inimigo: posicao_inimigo[0] => linha, [1] => coluna
+  // Inicia fora da tela (coluna -1)
+  int posicao_inimigo[2] = {4, -1};
 
-  int sprite_atual[5][5][3] = {
-      {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
-      {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
-      {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
-      {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
-      {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
-  };
+  // Sprite temporário do dino + inimigo
+  int sprite_atual[5][5][3];
+  limpa_sprite(sprite_atual);
 
+  // Tempo total de um "ciclo" e steps
   int total_delay = 1000;
   int sleep_delay = 10;
   int steps = total_delay / sleep_delay;
 
+  // Ajustes de delay do inimigo
   int inimigo_delay_minimo = 50;
-  int inimigo_delay_minimo2 = 50;
-
   int inimigo_delay = 200;
-  int inimigo_delay2 = 200;
-
   int inimigo_delay_reducao = 25;
-  int inimigo_delay_reducao2 = 25;
-
   int segundos_para_reducao_de_velocidade = 5;
-
   int inimigo_delay_atual = inimigo_delay;
-  int inimigo_delay_atual2 = inimigo_delay2;
 
+  // Placar de inimigos desviados
   int inimigos_desviados = 0;
   int atualiza_mensagem_de_inimigos_desviados = 0;
 
-  // Inicialização do i2c
+  // Inicializa I2C e o display SSD1306
   i2c_init(i2c1, ssd1306_i2c_clock * 1000);
-  gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
-  gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
-  gpio_pull_up(I2C_SDA);
-  gpio_pull_up(I2C_SCL);
+  gpio_set_function(14, GPIO_FUNC_I2C);
+  gpio_set_function(15, GPIO_FUNC_I2C);
+  gpio_pull_up(14);
+  gpio_pull_up(15);
 
-  // Processo de inicialização completo do OLED SSD1306
   ssd1306_init();
 
-  // Preparar área de renderização para o display (ssd1306_width pixels por ssd1306_n_pages páginas)
+  // Prepara a "área" de renderização no display (full screen)
   struct render_area frame_area = {
-    start_column : 0,
-    end_column : ssd1306_width - 1,
-    start_page : 0,
-    end_page : ssd1306_n_pages - 1
-  };
-
+      .start_column = 0,
+      .end_column = ssd1306_width - 1,
+      .start_page = 0,
+      .end_page = ssd1306_n_pages - 1};
   calculate_render_area_buffer_length(&frame_area);
 
-  // zera o display inteiro
+  // Limpa o display
   uint8_t ssd[ssd1306_buffer_length];
   memset(ssd, 0, ssd1306_buffer_length);
   render_on_display(ssd, &frame_area);
 
+  // Desenha o dinossauro em pé inicialmente
+  setLeds(sprite_dinossauro_em_pe);
+  npWrite();
+
+  // Usado para medir tempo de redução de velocidade do inimigo
   clock_t tempo_desde_velocidade_atualizada = clock();
 
-  setLeds(sprite_dinossauro_em_pe);
-
-  npWrite(); // Escreve os dados nos LEDs.
-
-  // Não faz mais nada. Loop infinito.
+  // Loop principal do jogo
   while (true)
   {
 
     for (int i = 0; i < steps; i++)
     {
+      // A cada "passo", resetamos a flag de msg no display
       atualiza_mensagem_de_inimigos_desviados = 0;
 
-      if (posicao_inimigo[1] == -1 && posicao_inimigo2[1] == -1)
-      {
-        if (rand() % 2 == 0)
-        {
-          inimigo = 1;
-        }
-        else
-        {
-          inimigo = 2;
-        }
-      }
-
+      // Limpa sprite_atual para refazer o frame
       limpa_sprite(sprite_atual);
 
+      // Leitura dos botões (puxados para cima, logo 0 = pressionado)
       if (gpio_get(BUTTON_PIN) == 0)
-      { // Botão pressionado (nível lógico baixo)
+      {
         pulo = 1;
         pulo_delay = 100;
       }
@@ -316,7 +335,7 @@ int main()
       }
 
       if (gpio_get(BUTTON_PIN2) == 0)
-      { // Botão pressionado (nível lógico baixo)
+      {
         abaixado = 1;
       }
       else if (abaixado_delay <= 0)
@@ -324,11 +343,12 @@ int main()
         abaixado = 0;
       }
 
-      if (abaixado == 1)
+      // Escolhe qual sprite de dino usar (em pé, pulando ou abaixado)
+      if (abaixado)
       {
         copia_sprite(sprite_dinossauro_abaixado, sprite_atual);
       }
-      else if (pulo == 1)
+      else if (pulo)
       {
         copia_sprite(sprite_dinossauro_pulando, sprite_atual);
       }
@@ -337,141 +357,95 @@ int main()
         copia_sprite(sprite_dinossauro_em_pe, sprite_atual);
       }
 
-      if (inimigo_delay_atual <= 0 && inimigo == 1)
+      // Lógica de movimentação do inimigo
+      if (inimigo_delay_atual <= 0)
       {
+        // Se inimigo saiu da tela, reaparece
         if (posicao_inimigo[1] == -1)
         {
-          posicao_inimigo[1] = 4;
+          posicao_inimigo[1] = 4;              // coluna inicial
+          posicao_inimigo[0] = rand() % 3 + 2; // linha aleatória (2..4)
         }
         else
         {
+          // Move o inimigo para a esquerda
           posicao_inimigo[1]--;
-
+          // Se saiu da coluna -1, significa que o dino desviou
           if (posicao_inimigo[1] == -1)
           {
             inimigos_desviados++;
             atualiza_mensagem_de_inimigos_desviados = 1;
           }
         }
-
+        // Se passou X segundos, reduz delay (aumenta velocidade)
         clock_t tempo_agora = clock();
-
         if ((tempo_agora - tempo_desde_velocidade_atualizada) / CLOCKS_PER_SEC >= segundos_para_reducao_de_velocidade)
         {
           inimigo_delay = max(inimigo_delay - inimigo_delay_reducao, inimigo_delay_minimo);
           tempo_desde_velocidade_atualizada = tempo_agora;
         }
-
+        // Reinicia o contador de delay do inimigo
         inimigo_delay_atual = inimigo_delay;
       }
 
-      if (inimigo_delay_atual2 <= 0 && inimigo == 2)
+      // Verifica colisão (Game Over se colidiu)
+      if (inimigo_colide(posicao_inimigo, sprite_atual))
       {
-        if (posicao_inimigo2[1] == -1)
-        {
-          posicao_inimigo2[1] = 4;
-        }
-        else
-        {
-          posicao_inimigo2[1]--;
-
-          if (posicao_inimigo2[1] == -1)
-          {
-            inimigos_desviados++;
-            atualiza_mensagem_de_inimigos_desviados = 1;
-          }
-        }
-
-        clock_t tempo_agora = clock();
-
-        if ((tempo_agora - tempo_desde_velocidade_atualizada) / CLOCKS_PER_SEC >= segundos_para_reducao_de_velocidade)
-        {
-          inimigo_delay2 = max(inimigo_delay2 - inimigo_delay_reducao2, inimigo_delay_minimo2);
-          tempo_desde_velocidade_atualizada = tempo_agora;
-        }
-
-        inimigo_delay_atual2 = inimigo_delay2;
-      }
-
-      if (inimigo_colide(posicao_inimigo, sprite_atual) || inimigo_colide(posicao_inimigo2, sprite_atual))
-      {
-        // game over
         colidiu = 1;
       }
 
+      // Se o inimigo está visível, pinta ele de vermelho
       if (posicao_inimigo[1] != -1)
       {
-        int linha = posicao_inimigo[0];
-        int coluna = posicao_inimigo[1];
-
-        // vermelho
-        sprite_atual[linha][coluna][0] = 255;
-        sprite_atual[linha][coluna][1] = 0;
-        sprite_atual[linha][coluna][2] = 0;
+        int L = posicao_inimigo[0];
+        int C = posicao_inimigo[1];
+        sprite_atual[L][C][0] = 255;
+        sprite_atual[L][C][1] = 0;
+        sprite_atual[L][C][2] = 0;
       }
 
-      if (posicao_inimigo2[1] != -1)
-      {
-        int linha = posicao_inimigo2[0];
-        int coluna = posicao_inimigo2[1];
-
-        // vermelho
-        sprite_atual[linha][coluna][0] = 255;
-        sprite_atual[linha][coluna][1] = 0;
-        sprite_atual[linha][coluna][2] = 0;
-      }
-
+      // Copia sprite para o buffer de LEDs e escreve fisicamente
       setLeds(sprite_atual);
-
       npWrite();
 
+      // Pequeno delay entre cada "step"
       sleep_ms(sleep_delay);
 
+      // Decrementa timers de pulo, abaixado e do inimigo
       if (pulo_delay >= 0)
-      {
         pulo_delay -= sleep_delay;
-      }
-
       if (abaixado_delay >= 0)
-      {
         abaixado_delay -= sleep_delay;
-      }
-
       if (inimigo_delay_atual >= 0)
-      {
         inimigo_delay_atual -= sleep_delay;
-      }
 
-      if (inimigo_delay_atual2 >= 0)
+      // Se desviou, atualiza mensagem no display
+      if (atualiza_mensagem_de_inimigos_desviados)
       {
-        inimigo_delay_atual2 -= sleep_delay;
-      }
-
-      if (atualiza_mensagem_de_inimigos_desviados == 1)
-      {
-        uint8_t ssd[ssd1306_buffer_length];
+        // Apaga a tela
         memset(ssd, 0, ssd1306_buffer_length);
         render_on_display(ssd, &frame_area);
 
-        // Parte do código para exibir a mensagem no display (opcional: mudar ssd1306_height para 32 em ssd1306_i2c.h)
-        // /**
-        char str[16]; // maximo de caracteres (128 / 8)
+        // Cria mensagem de "Dino Runner" + quantidade de desviados
+        char str[16];
         sprintf(str, "  Desviados: %d", inimigos_desviados);
 
         char *text[] = {
             "  Dino Runner   ",
             str};
 
+        // Desenha essas linhas no buffer do display
         int y = 0;
-        for (uint i = 0; i < count_of(text); i++)
+        for (uint j = 0; j < count_of(text); j++)
         {
-          ssd1306_draw_string(ssd, 5, y, text[i]);
+          ssd1306_draw_string(ssd, 5, y, text[j]);
           y += 8;
         }
         render_on_display(ssd, &frame_area);
       }
 
-      if (colidiu == 1)
+      // Se colidiu, encerramos o jogo (retorna ao sistema)
+      if (colidiu)
       {
         return 0;
       }
